@@ -2,9 +2,9 @@ name: Erlang CI
 
 on:
   push:
-    branches: [ develop ]
+    branches: [ nhse-develop ]
   pull_request:
-    branches: [ develop ]
+    branches: [ nhse-develop ]
 
 
 jobs:
