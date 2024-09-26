@@ -78,23 +78,16 @@ value(timestamp, {_V, TS}) ->
 
 %% @doc Assign a `Value' to the `lwwreg()'
 %% associating the update with time `TS'
--spec update(lwwreg_op(), term(), lwwreg()) ->
-                    {ok, lwwreg()}.
+-spec update(lwwreg_op(), term(), lwwreg()) -> {ok, lwwreg()}.
 update({assign, Value, TS}, _Actor, {_OldVal, OldTS}) when is_integer(TS), TS > 0, TS >= OldTS ->
     {ok, {Value, TS}};
 update({assign, _Value, _TS}, _Actor, OldLWWReg) ->
     {ok, OldLWWReg};
 %% For when users don't provide timestamps
 %% don't think it is a good idea to mix server and client timestamps
-update({assign, Value}, _Actor, {OldVal, OldTS}) ->
+update({assign, Value}, Actor, OldLWWReg) ->
     MicroEpoch = make_micro_epoch(),
-    LWW = case MicroEpoch > OldTS of
-              true ->
-                  {Value, MicroEpoch};
-              false ->
-                  {OldVal, OldTS}
-          end,
-    {ok, LWW}.
+    update({assign, Value, MicroEpoch}, Actor, OldLWWReg).
 
 update(Op, Actor, Reg, _Ctx) ->
     update(Op, Actor, Reg).
