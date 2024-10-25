@@ -1,7 +1,6 @@
 # riak dt
 
-[![Erlang CI Actions Status](https://github.com/basho/riak_dt/workflows/Erlang%20CI/badge.svg)](https://github.com/basho/riak_dt/actions)
-
+![Riak DataTypes OpenRiak Status](https://github.com/OpenRiak/riak_dt/actions/workflows/erlang.yml/badge.svg?branch=openriak-3.2)
 
 ## WHAT?
 
