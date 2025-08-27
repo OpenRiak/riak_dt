@@ -30,7 +30,7 @@
 %% causal context of the map, even when fields are removed, and
 %% subsequently re-added.
 %%
-%% The contents of the Map are modeled as a dictionary of
+%% The contents of the Map are modeled as a `t:map/0` of
 %% `field_name()' to `field_value()' mappings. Where `field_ name()'
 %% is a two tuple of an opaque `binary()' name, and one of the
 %% embeddable crdt types (currently `riak_dt_orswot',
@@ -196,9 +196,11 @@
 
 -type binary_map() :: binary(). %% A binary that from_binary/1 will accept
 -type riak_dt_map() :: {riak_dt_vclock:vclock(), entries(), deferred()}.
+-type dict_map() :: {riak_dt_vclock:vclock(), dict_entries(), dict_deferred()}.
 -type ord_map() :: {riak_dt_vclock:vclock(), orddict:orddict(), orddict:orddict()}.
--type any_map() :: riak_dt_map() | ord_map().
--type entries() :: dict(field_name(), field_value()).
+-type any_map() :: riak_dt_map() | dict_map() | ord_map().
+-type entries() :: #{field_name() => field_value()}.
+-type dict_entries() :: dict(field_name(), field_value()).
 -type field_name() :: {Name :: binary(), CRDTModule :: crdt_mod()}.
 -type field_value() :: {crdts(), tombstone()}.
 
@@ -211,7 +213,8 @@
 %% Only field removals can be deferred. CRDTs stored in the map may
 %% have contexts and deferred operations, but as these are part of the
 %% state, they are stored under the field as an update like any other.
--type deferred() :: dict(context(), [field_name()]).
+-type deferred() :: #{context() => [field_name()]}.
+-type dict_deferred() :: dict(context(), [field_name()]).
 
 -ifdef(namespaced_types).
 -type dict(A, B) :: dict:dict(A, B).
@@ -246,28 +249,29 @@
 -type value() :: {field_name(), values() | integer() | [term()] | boolean() | term()}.
 -type precondition_error() :: {error, {precondition, {not_present, field_name()}}}.
 
+-define(MAP, maps).
 -define(DICT, dict).
 -define(SET, sets).
 
 %% @doc Create a new, empty Map.
 -spec new() -> riak_dt_map().
 new() ->
-    {riak_dt_vclock:fresh(), ?DICT:new(), ?DICT:new()}.
+    {riak_dt_vclock:fresh(), #{}, #{}}.
 
 %% @doc sets the clock in the map to that `Clock'. Used by a
 %% containing Map for sub-CRDTs
 -spec parent_clock(riak_dt_vclock:vclock(), riak_dt_map()) ->
     riak_dt_map().
 parent_clock(Clock, Map) ->
-    {_MapClock, Values, Deferred} = to_v2(Map),
+    {_MapClock, Values, Deferred} = to_v3(Map),
     {Clock, Values, Deferred}.
 
 %% @doc get the current set of values for this Map
 -spec value(riak_dt_map()) -> values().
 value({_C, V, _D}=Map) when is_list(V) ->
-    value(to_v2(Map));
+    value(to_v3(Map));
 value({_Clock, Values, _Deferred}) ->
-    lists:sort(?DICT:fold(fun({Name, Type}, CRDTs, Acc) ->
+    lists:sort(?MAP:fold(fun({Name, Type}, CRDTs, Acc) ->
                                   Merged = merge_crdts(Type, CRDTs),
                                   [{{Name, Type}, Type:value(Merged)} | Acc] end,
                           [],
@@ -279,11 +283,11 @@ merge_field({_Name, Type}, error) ->
 merge_field({_Name, Type}, {ok, CRDTs}) ->
     merge_crdts(Type, CRDTs);
 merge_field(Field, Values) ->
-    merge_field(Field, ?DICT:find(Field, Values)).
+    merge_field(Field, ?MAP:find(Field, Values)).
 
 %% @private merge the CRDTs of a type
 merge_crdts(Type, {CRDTs, TS}) ->
-    V = ?DICT:fold(fun(_Dot, CRDT, CRDT0) ->
+    V = ?MAP:fold(fun(_Dot, CRDT, CRDT0) ->
                              Type:merge(CRDT0, CRDT) end,
                      Type:new(),
                      CRDTs),
@@ -314,7 +318,7 @@ value(_, Map) ->
 -spec update(map_op(), riak_dt:actor() | riak_dt:dot(), riak_dt_map()) ->
                     {ok, riak_dt_map()} | precondition_error().
 update(Op, ActorOrDot, {_C, V, _D}=Map) when is_list(V) ->
-    update(Op, ActorOrDot, to_v2(Map));
+    update(Op, ActorOrDot, to_v3(Map));
 update(Op, ActorOrDot, Map) ->
     update(Op, ActorOrDot, Map, undefined).
 
@@ -327,7 +331,7 @@ update(Op, ActorOrDot, Map) ->
 -spec update(map_op(), riak_dt:actor() | riak_dt:dot(), riak_dt_map(),
              riak_dt:context()) -> {ok, riak_dt_map()}.
 update(Op, ActorOrDot, {_C, V, _D}=Map, Ctx) when is_list(V) ->
-    update(Op, ActorOrDot, to_v2(Map), Ctx);
+    update(Op, ActorOrDot, to_v3(Map), Ctx);
 update({update, Ops}, ActorOrDot, {Clock0, Values, Deferred}, Ctx) ->
     {Dot, Clock} = update_clock(ActorOrDot, Clock0),
     apply_ops(Ops, Dot, {Clock, Values, Deferred}, Ctx).
@@ -356,13 +360,8 @@ apply_ops([{update, {_Name, Type}=Field, Op} | Rest], Dot, {Clock, Values, Defer
     CRDT1 = Type:parent_clock(Clock, CRDT),
     case Type:update(Op, Dot, CRDT1, Ctx) of
         {ok, Updated} ->
-            NewValues = ?DICT:store(Field, {?DICT:store(Dot, Updated, ?DICT:new()),
-                                              %% old tombstone was
-                                              %% merged into current
-                                              %% value so create a new
-                                              %% empty one
-                                              Type:new()}
-                                     , Values),
+            %% old tombstone was merged into current value so create a new empty one
+            NewValues = Values#{Field => {#{Dot => Updated}, Type:new()}},
             apply_ops(Rest, Dot, {Clock, NewValues, Deferred}, Ctx);
         Error ->
             Error
@@ -390,20 +389,20 @@ apply_ops([{remove, Field} | Rest], Dot, Map, Ctx) ->
 -spec remove_field(field_name(), riak_dt_map(), context()) ->
                           {ok, riak_dt_map()} | precondition_error().
 remove_field(Field, {Clock, Values, Deferred}, undefined) ->
-    case ?DICT:find(Field, Values) of
+    case ?MAP:find(Field, Values) of
         error ->
             {error, {precondition, {not_present, Field}}};
         {ok, _Removed} ->
-            {ok, {Clock, ?DICT:erase(Field, Values), Deferred}}
+            {ok, {Clock, ?MAP:without([Field], Values), Deferred}}
     end;
 %% Context removes
 remove_field(Field, {Clock, Values, Deferred0}, Ctx) ->
     Deferred = defer_remove(Clock, Ctx, Field, Deferred0),
     NewValues = case ctx_rem_field(Field, Values, Ctx, Clock) of
                     empty ->
-                        ?DICT:erase(Field, Values);
+                        ?MAP:without([Field], Values);
                     CRDTs ->
-                        ?DICT:store(Field, CRDTs, Values)
+                        Values#{Field => CRDTs}
                 end,
     {ok, {Clock, NewValues, Deferred}}.
 
@@ -421,11 +420,11 @@ ctx_rem_field({_, Type}, {ok, {CRDTs, TS0}}, Ctx, MapClock) ->
     %%
     TombstoneClock = riak_dt_vclock:glb(Ctx, MapClock), %% GLB is events seen by both clocks only
     TS = Type:parent_clock(TombstoneClock, Type:new()),
-    Remaining = ?DICT:filter(fun(Dot, _CRDT) ->
+    Remaining = ?MAP:filter(fun(Dot, _CRDT) ->
                                        is_dot_unseen(Dot, Ctx)
                                end,
                            CRDTs),
-    case ?DICT:size(Remaining) of
+    case ?MAP:size(Remaining) of
         0 -> %% Ctx remove removed all dots for field
             empty;
         _ ->
@@ -433,7 +432,7 @@ ctx_rem_field({_, Type}, {ok, {CRDTs, TS0}}, Ctx, MapClock) ->
             {Remaining, Type:merge(TS, TS0)}
     end;
 ctx_rem_field(Field, Values, Ctx, MapClock) ->
-    ctx_rem_field(Field, ?DICT:find(Field, Values), Ctx, MapClock).
+    ctx_rem_field(Field, ?MAP:find(Field, Values), Ctx, MapClock).
 
 %% @private If we're asked to remove something we don't have (or have,
 %% but maybe not all 'updates' for it), is it because we've not seen
@@ -454,7 +453,7 @@ defer_remove(Clock, Ctx, Field, Deferred) ->
     case riak_dt_vclock:descends(Clock, Ctx) of
         %% no need to save this remove, we're done
         true -> Deferred;
-        false -> ?DICT:update(Ctx,
+        false -> ?MAP:update_with(Ctx,
                                 fun(Fields) ->
                                         ordsets:add_element(Field, Fields) end,
                                 ordsets:add_element(Field, ordsets:new()),
@@ -465,14 +464,14 @@ defer_remove(Clock, Ctx, Field, Deferred) ->
 -spec merge(riak_dt_map(), riak_dt_map()) -> riak_dt_map().
 merge({_LHSC, LHSE, _LHSD}=LHS, {_RHSC, RHSE, _RHSD}=RHS) when is_list(LHSE);
                                                                is_list(RHSE) ->
-    merge(to_v2(LHS), to_v2(RHS));
+    merge(to_v3(LHS), to_v3(RHS));
 merge(Map, Map) ->
     Map;
 %% @TODO is there a way to optimise this, based on clocks maybe?
 merge({LHSClock, LHSEntries, LHSDeferred}, {RHSClock, RHSEntries, RHSDeferred}) ->
     Clock = riak_dt_vclock:merge([LHSClock, RHSClock]),
     {CommonKeys, LHSUnique, RHSUnique} = key_sets(LHSEntries, RHSEntries),
-    Acc0 = filter_unique(LHSUnique, LHSEntries, RHSClock, ?DICT:new()),
+    Acc0 = filter_unique(LHSUnique, LHSEntries, RHSClock, #{}),
     Acc1 = filter_unique(RHSUnique, RHSEntries, LHSClock, Acc0),
     Entries = merge_common(CommonKeys, LHSEntries, RHSEntries, LHSClock, RHSClock, Acc1),
     Deferred = merge_deferred(RHSDeferred, LHSDeferred),
@@ -483,13 +482,13 @@ merge({LHSClock, LHSEntries, LHSDeferred}, {RHSClock, RHSEntries, RHSDeferred}) 
 -spec filter_unique(riak_dt_set(), entries(), riak_dt_vclock:vclock(), entries()) -> entries().
 filter_unique(FieldSet, Entries, Clock, Acc) ->
     ordsets:fold(fun({_Name, Type}=Field, Keep) ->
-                      {Dots, TS} = ?DICT:fetch(Field, Entries),
-                      KeepDots = ?DICT:filter(fun(Dot, _CRDT) ->
+                      {Dots, TS} = ?MAP:get(Field, Entries),
+                      KeepDots = ?MAP:filter(fun(Dot, _CRDT) ->
                                                       is_dot_unseen(Dot, Clock)
                                               end,
                                               Dots),
 
-                      case ?DICT:size(KeepDots) of
+                      case ?MAP:size(KeepDots) of
                           0 ->
                               Keep;
                           _ ->
@@ -502,7 +501,7 @@ filter_unique(FieldSet, Entries, Clock, Acc) ->
                               %% removed it, then the removed dots
                               %% will be propogated by the tombstone.
                               Tombstone = Type:merge(TS, Type:parent_clock(Clock, Type:new())),
-                              ?DICT:store(Field, {KeepDots, Tombstone}, Keep)
+                              Keep#{Field => {KeepDots, Tombstone}}
                       end
               end,
               Acc,
@@ -515,13 +514,13 @@ is_dot_unseen(Dot, Clock) ->
     not riak_dt_vclock:descends(Clock, [Dot]).
 
 %% @doc Get the keys from an ?DICT as a ?SET
--spec key_set(riak_dt_dict()) -> riak_dt_set().
-key_set(Dict) ->
-    ordsets:from_list(?DICT:fetch_keys(Dict)).
+-spec key_set(map()) -> riak_dt_set().
+key_set(Map) ->
+    ordsets:from_list(?MAP:keys(Map)).
 
 %% @doc break the keys from an two ?DICTs out into three ?SETs, the
 %% common keys, those unique to one, and those unique to the other.
--spec key_sets(riak_dt_dict(), riak_dt_dict()) -> {riak_dt_set(), riak_dt_set(), riak_dt_set()}.
+-spec key_sets(map(), map()) -> {riak_dt_set(), riak_dt_set(), riak_dt_set()}.
 key_sets(LHS, RHS) ->
     LHSet = key_set(LHS),
     RHSet = key_set(RHS),
@@ -532,14 +531,14 @@ key_sets(LHS, RHS) ->
 
 %% @private for a set of dots (that are unique to one side) decide
 %% whether to keep, or drop each.
--spec filter_dots(riak_dt_set(), riak_dt_dict(), riak_dt_vclock:vclock()) -> entries().
+-spec filter_dots(riak_dt_set(), map(), riak_dt_vclock:vclock()) -> entries().
 filter_dots(Dots, CRDTs, Clock) ->
     DotsToKeep = ordsets:filter(fun(Dot) ->
                                      is_dot_unseen(Dot, Clock)
                              end,
                              Dots),
 
-    ?DICT:filter(fun(Dot, _CRDT) ->
+    ?MAP:filter(fun(Dot, _CRDT) ->
                            ordsets:is_element(Dot, DotsToKeep)
                    end,
                    CRDTs).
@@ -549,30 +548,30 @@ filter_dots(Dots, CRDTs, Clock) ->
 %% only on one side, drop it if dominated by the otherside's clock.
 merge_common(FieldSet, LHS, RHS, LHSClock, RHSClock, Acc) ->
     ordsets:fold(fun({_, Type}=Field, Keep) ->
-                      {LHSDots, LHTS} = ?DICT:fetch(Field, LHS),
-                      {RHSDots, RHTS} = ?DICT:fetch(Field, RHS),
+                      {LHSDots, LHTS} = ?MAP:get(Field, LHS),
+                      {RHSDots, RHTS} = ?MAP:get(Field, RHS),
                       {CommonDots, LHSUniqe, RHSUnique} = key_sets(LHSDots, RHSDots),
                       TS = Type:merge(RHTS, LHTS),
 
                       CommonSurviving = ordsets:fold(fun(Dot, Common) ->
-                                                          L = ?DICT:fetch(Dot, LHSDots),
-                                                          ?DICT:store(Dot, L, Common)
+                                                          L = ?MAP:get(Dot, LHSDots),
+                                                          Common#{Dot => L}
                                                   end,
-                                                  ?DICT:new(),
+                                                  #{},
                                                   CommonDots),
 
                       LHSSurviving = filter_dots(LHSUniqe, LHSDots, RHSClock),
                       RHSSurviving = filter_dots(RHSUnique, RHSDots, LHSClock),
 
-                      Dots = ?DICT:from_list(lists:merge([?DICT:to_list(CommonSurviving),
-                                                          ?DICT:to_list(LHSSurviving),
-                                                          ?DICT:to_list(RHSSurviving)])),
+                      Dots = ?MAP:from_list(lists:merge([?MAP:to_list(CommonSurviving),
+                                                         ?MAP:to_list(LHSSurviving),
+                                                         ?MAP:to_list(RHSSurviving)])),
 
-                      case ?DICT:size(Dots) of
+                      case ?MAP:size(Dots) of
                           0 ->
                               Keep;
                           _ ->
-                              ?DICT:store(Field, {Dots, TS}, Keep)
+                              Keep#{Field => {Dots, TS}}
                       end
 
               end,
@@ -582,7 +581,7 @@ merge_common(FieldSet, LHS, RHS, LHSClock, RHSClock, Acc) ->
 %% @private
 -spec merge_deferred(deferred(), deferred()) -> deferred().
 merge_deferred(LHS, RHS) ->
-    ?DICT:merge(fun(_K, LH, RH) ->
+    ?MAP:merge_with(fun(_K, LH, RH) ->
                           ordsets:union(LH, RH) end,
                   LHS, RHS).
 
@@ -591,10 +590,10 @@ merge_deferred(LHS, RHS) ->
 -spec apply_deferred(riak_dt_vclock:vclock(), entries(), deferred()) ->
                             {riak_dt_vclock:vclock(), entries(), deferred()}.
 apply_deferred(Clock, Entries, Deferred) ->
-    ?DICT:fold(fun(Ctx, Fields, Map) ->
+    ?MAP:fold(fun(Ctx, Fields, Map) ->
                        remove_all(Fields, Map, Ctx)
                end,
-               {Clock, Entries, ?DICT:new()},
+               {Clock, Entries, #{}},
                Deferred).
 
 %% @private
@@ -613,13 +612,13 @@ remove_all(Fields, Map, Ctx) ->
 -spec equal(riak_dt_map(), riak_dt_map()) -> boolean().
 equal({_LHSC, LHSE, _LHSD}=LHS, {_RHSC, RHSE, _RHSD}=RHS) when is_list(LHSE);
                                                                is_list(RHSE) ->
-    equal(to_v2(LHS), to_v2(RHS));
+    equal(to_v3(LHS), to_v3(RHS));
 equal({Clock1, Values1, Deferred1}, {Clock2, Values2, Deferred2}) ->
     riak_dt_vclock:equal(Clock1, Clock2) andalso
-        lists:sort(?DICT:to_list(Deferred1)) ==
-        lists:sort(?DICT:to_list(Deferred2)) andalso
-        pairwise_equals(lists:sort(?DICT:to_list(Values1)),
-                        lists:sort(?DICT:to_list(Values2))).
+        lists:sort(?MAP:to_list(Deferred1)) ==
+        lists:sort(?MAP:to_list(Deferred2)) andalso
+        pairwise_equals(lists:sort(?MAP:to_list(Values1)),
+                        lists:sort(?MAP:to_list(Values2))).
 
 -spec pairwise_equals([{field_name(), field_value()}],
                         [{field_name(), field_value()}]) -> boolean().
@@ -634,7 +633,7 @@ pairwise_equals([{{Name, Type}, {Dots1, TS1}}| Rest1], [{{Name, Type}, {Dots2, T
     %% tombstone. Both are correct when it comes to determining the
     %% final value. As long as tombstones are not conflicting (that is
     %% A == B | A > B | B > A)
-    case {?DICT:fetch_keys(Dots1) == ?DICT:fetch_keys(Dots2), Type:equal(TS1, TS2)} of
+    case {lists:sort(?MAP:keys(Dots1)) == lists:sort(?MAP:keys(Dots2)), Type:equal(TS1, TS2)} of
         {true, true} ->
             pairwise_equals(Rest1, Rest2);
         _ ->
@@ -661,31 +660,32 @@ precondition_context({Clock, _Field, _Deferred}) ->
 %%                   of lag/staleness.
 -spec stats(riak_dt_map()) -> [{atom(), integer()}].
 stats(Map) ->
-    [ {S, stat(S, to_v2(Map))} || S <- [actor_count, field_count, duplication, deferred_length]].
+    [ {S, stat(S, to_v3(Map))} || S <- [actor_count, field_count, duplication, deferred_length]].
 
 -spec stat(atom(), riak_dt_map()) -> number() | undefined.
 stat(Stat, {_, E, _D}=Map) when is_list(E) ->
-    stat(Stat, to_v2(Map));
+    stat(Stat, to_v3(Map));
 stat(actor_count, {Clock, _, _}) ->
     length(Clock);
 stat(field_count, {_, Fields, _}) ->
-    ?DICT:size(Fields);
+    ?MAP:size(Fields);
 stat(duplication, {_, Fields, _}) ->
     %% Number of duplicated fields
-    {FieldCnt, Duplicates} = ?DICT:fold(fun(_Field, {Dots ,_}, {FCnt, DCnt}) ->
-                                                  {FCnt+1, DCnt + ?DICT:size(Dots)}
+    {FieldCnt, Duplicates} = ?MAP:fold(fun(_Field, {Dots ,_}, {FCnt, DCnt}) ->
+                                                  {FCnt+1, DCnt + ?MAP:size(Dots)}
                                           end,
                                           {0, 0},
                                           Fields),
     Duplicates - FieldCnt;
 stat(deferred_length, {_, _, Deferred}) ->
-    ?DICT:size(Deferred);
+    ?MAP:size(Deferred);
 stat(_,_) -> undefined.
 
 -include("riak_dt_tags.hrl").
 -define(TAG, ?DT_MAP_TAG).
 -define(V1_VERS, 1).
 -define(V2_VERS, 2).
+-define(V3_VERS, 3).
 
 %% @doc returns a binary representation of the provided `riak_dt_map()'.
 %% The resulting binary is tagged and versioned for ease of future
@@ -697,7 +697,7 @@ stat(_,_) -> undefined.
 %% @see from_binary/1
 -spec to_binary(riak_dt_map()) -> binary_map().
 to_binary(Map) ->
-    {ok, B} = to_binary(?V2_VERS, Map),
+    {ok, B} = to_binary(?V3_VERS, Map),
     B.
 
 %% @private encode v1 maps as v2, and vice versa. The first argument
@@ -709,21 +709,46 @@ to_binary(?V1_VERS, Map0) ->
 to_binary(?V2_VERS, Map0) ->
     Map = to_v2(Map0),
     {ok, <<?TAG:8/integer, ?V2_VERS:8/integer, (riak_dt:to_binary(Map))/binary>>};
+to_binary(?V3_VERS, Map0) ->
+    Map = to_v3(Map0),
+    {ok, <<?TAG:8/integer, ?V3_VERS:8/integer, (riak_dt:to_binary(Map))/binary>>};
 to_binary(Vers, _Map) ->
     ?UNSUPPORTED_VERSION(Vers).
 
 -spec to_version(pos_integer(), any_map()) -> any_map().
+to_version(3, Map) -> to_v3(Map);
 to_version(2, Map) -> to_v2(Map);
 to_version(1, Map) -> to_v1(Map);
 to_version(_, Map) -> Map.
 
+%% @private transpose a v2 map (dicts) to a v3 (maps)
+-spec to_v3(any_map()) -> riak_dt_map().
+to_v3({Clock, Fields0, Deferred0}) when is_list(Fields0),
+                                         is_list(Deferred0) ->
+    Fields = ?DICT:from_list([ field_to_v2(Key, Value) || {Key, Value} <- Fields0]),
+    Deferred = ?DICT:from_list(Deferred0),
+    to_v3({Clock, Fields, Deferred});
+to_v3(S={Clock, Fields0, Deferred0}) ->
+    if
+        is_tuple(Fields0) andalso is_tuple(Deferred0) ->
+            Fields = ?MAP:from_list([ field_to_v3(Key, Value) || {Key, Value} <- ?DICT:to_list(tuple_to_dict(Fields0)) ]),
+            Deferred = ?MAP:from_list(?DICT:to_list(tuple_to_dict(Deferred0))),
+            {Clock, Fields, Deferred};
+        true ->
+            S
+    end.
 
 %% @private transpose a v1 map (orddicts) to a v2 (dicts)
--spec to_v2(any_map()) -> riak_dt_map().
+-spec to_v2(any_map()) -> dict_map().
 to_v2({Clock, Fields0, Deferred0}) when is_list(Fields0),
                                          is_list(Deferred0) ->
     Fields = ?DICT:from_list([ field_to_v2(Key, Value) || {Key, Value} <- Fields0]),
     Deferred = ?DICT:from_list(Deferred0),
+    {Clock, Fields, Deferred};
+to_v2({Clock, Fields0, Deferred0}) when is_map(Fields0),
+                                         is_map(Deferred0) ->
+    Fields = ?DICT:from_list([ field_to_v2(Key, Value) || {Key, Value} <- ?MAP:to_list(Fields0) ]),
+    Deferred = ?DICT:from_list([ field_to_v2(Key, Value) || {Key, Value} <- ?MAP:to_list(Deferred0) ]),
     {Clock, Fields, Deferred};
 to_v2(S) ->
     S.
@@ -733,12 +758,17 @@ to_v2(S) ->
 to_v1({_Clock, Fields0, Deferred0}=S) when is_list(Fields0),
                                            is_list(Deferred0) ->
     S;
-to_v1({Clock, Fields0, Deferred0}) ->
-    %% Must be dicts, there is no is_dict test though
-    %% should we use error handling as logic here??
-    Fields = orddict:map(fun field_to_v1/2, riak_dt:dict_to_orddict(Fields0)),
-    Deferred = riak_dt:dict_to_orddict(Deferred0),
-    {Clock, Fields, Deferred}.
+to_v1({Clock, Fields0, Deferred0}) when is_tuple(Fields0), is_tuple(Deferred0) ->
+    if
+        is_tuple(Fields0) andalso is_tuple(Deferred0) ->
+            %% Must be dicts, there is no is_dict test though
+            %% should we use error handling as logic here??
+            Fields = orddict:map(fun field_to_v1/2, riak_dt:dict_to_orddict(tuple_to_dict(Fields0))),
+            Deferred = riak_dt:dict_to_orddict(tuple_to_dict(Deferred0)),
+            {Clock, Fields, Deferred};
+        true ->
+            erlang:error({badarg, <<"Cannot convert v3 to v1">>})
+    end.
 
 %% @doc When the argument is a `binary_map()' produced by
 %% `to_binary/1' will return the original `riak_dt_map()'.
@@ -751,20 +781,38 @@ from_binary(<<?TAG:8/integer, ?V1_VERS:8/integer, B/binary>>) ->
     %% upgrade ondisk v1 structure to v2 term. This will also handle
     %% the horrid riak-2.0.4 map that has lists for entries/deferred,
     %% but dict elsewhere, and v2 types nested!
-    {ok, to_v2(Map)};
+    {ok, to_v3(Map)};
 from_binary(<<?TAG:8/integer, ?V2_VERS:8/integer, B/binary>>) ->
     %% Only fully v2 maps are written as v2, calling to_v2 a paranoid
     %% waste?
     Map = riak_dt:from_binary(B),
-    {ok, to_v2(Map)};
+    {ok, to_v3(Map)};
+from_binary(<<?TAG:8/integer, ?V3_VERS:8/integer, B/binary>>) ->
+    Map = riak_dt:from_binary(B),
+    {ok, to_v3(Map)};
 from_binary(<<?TAG:8/integer, Vers:8/integer, _B/binary>>) ->
     ?UNSUPPORTED_VERSION(Vers);
 from_binary(_B) ->
     ?INVALID_BINARY.
 
+field_to_v3({Name, Type}, {CRDTs0, Tombstone0}) when is_list(CRDTs0) ->
+    Tombstone = Type:to_version(3, Tombstone0),
+    CRDTs = ?MAP:from_list([ {Dot, Type:to_version(3, CRDT)} || {Dot, CRDT} <- CRDTs0 ]),
+    {{Name, Type}, {CRDTs, Tombstone}};
+field_to_v3(K={Name, Type}, V={CRDTs0, Tombstone0}) ->
+    if
+        is_tuple(CRDTs0) ->
+            CRDTs1 = ?DICT:to_list(tuple_to_dict(CRDTs0)),
+            Tombstone = Type:to_version(3, Tombstone0),
+            CRDTs = ?MAP:from_list([ {Dot, Type:to_version(3, CRDT)} || {Dot, CRDT} <- CRDTs1 ]),
+            {{Name, Type}, {CRDTs, Tombstone}};
+        true ->
+            {K, V}
+    end.
+
 field_to_v2({Name, Type}, {CRDTs0, Tombstone0}) when is_list(CRDTs0) ->
     Tombstone = Type:to_version(2, Tombstone0),
-    CRDTs = dict:from_list([ {Dot, Type:to_version(2, CRDT)} || {Dot, CRDT} <- CRDTs0 ]),
+    CRDTs = ?DICT:from_list([ {Dot, Type:to_version(2, CRDT)} || {Dot, CRDT} <- CRDTs0 ]),
     {{Name, Type}, {CRDTs, Tombstone}};
 field_to_v2(FieldName, FieldValue) ->
     %% this is a messed up half v1 half v2 map from the ill fated
@@ -781,6 +829,11 @@ field_to_v1({_Name, Type}, {CRDTs0, Tombstone0}) ->
                                 Type:to_version(1, CRDT)
                         end, riak_dt:dict_to_orddict(CRDTs0)),
     {CRDTs, Tombstone}.
+
+-spec tuple_to_dict(tuple()) -> riak_dt_dict().
+tuple_to_dict(T) ->
+    % @todo We're trying to trick dialyzer into allowing us to know that a dict is a tuple. It's not working.
+    T.
 
 %% ===================================================================
 %% EUnit tests
@@ -1025,8 +1078,7 @@ prop_v1_downgrade_roundtrip() ->
             begin
                 {ok, ConvertedMap} = from_binary(to_binary(to_version(1, Map))),
                 conjunction([{equal, equal(Map, ConvertedMap)},
-                             {not_v1, equals(to_v2(ConvertedMap), ConvertedMap)}])
+                             {not_v1, equals(to_v3(ConvertedMap), ConvertedMap)}])
             end).
 
 -endif.
-
