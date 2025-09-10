@@ -289,8 +289,7 @@ merge({Clock, Entries, Deferred}, {Clock, Entries, Deferred}) ->
 merge({LHSClock, LHSEntries, LHSDeferred}, {RHSClock, RHSEntries, RHSDeferred}) ->
     Clock = riak_dt_vclock:merge([LHSClock, RHSClock]),
     RHSEmpty =
-        dict:is_empty(RHSDeferred) andalso
-        dict:is_empty(RHSDeferred) andalso
+        dict:is_empty(RHSEntries) andalso
         RHSClock == [],
     Entries =
         case RHSEmpty of
