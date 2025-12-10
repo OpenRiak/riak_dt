@@ -1,6 +1,6 @@
 # riak dt
 
-![Riak DataTypes OpenRiak Status](https://github.com/OpenRiak/riak_dt/actions/workflows/erlang.yml/badge.svg?branch=openriak-3.2)
+![Riak DataTypes OpenRiak Status](https://github.com/OpenRiak/riak_dt/actions/workflows/erlang.yml/badge.svg?branch=openriak-3.4)
 
 ## WHAT?
 
