@@ -122,11 +122,7 @@
 
 -type precondition_error() :: {error, {precondition ,{not_present, member()}}}.
 
--ifdef(namespaced_types).
 -type dict(A, B) :: dict:dict(A, B).
--else.
--type dict(_A, _B) :: dict().
--endif.
 
 -define(DICT, dict).
 

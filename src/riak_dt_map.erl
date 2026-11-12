@@ -213,11 +213,7 @@
 %% state, they are stored under the field as an update like any other.
 -type deferred() :: dict(context(), [field_name()]).
 
--ifdef(namespaced_types).
 -type dict(A, B) :: dict:dict(A, B).
--else.
--type dict(_A, _B) :: dict().
--endif.
 
 %% limited to only those mods that support both a shared causal
 %% context, and by extension, the reset-remove semantic.
